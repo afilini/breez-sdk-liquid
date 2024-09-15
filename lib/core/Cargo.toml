@@ -23,8 +23,8 @@ lwk_common = "0.7.0"
 lwk_signer = "0.7.0"
 lwk_wollet = { git = "https://github.com/dangeross/lwk", branch = "savage-try-headers-subscribe" }
 #lwk_wollet = "0.7.0"
-rusqlite = { version = "0.31", features = ["backup", "bundled"] }
-rusqlite_migration = "1.0"
+rusqlite = { version = "0.32.1", features = ["backup", "bundled"] }
+rusqlite_migration = "1.3.0-ALPHA-WITHOUT-TOKIO.1 "
 sdk-common = { git = "https://github.com/breez/breez-sdk", branch = "main", features = ["liquid"]}
 serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1.0.116"
