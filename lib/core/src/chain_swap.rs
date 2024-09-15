@@ -21,7 +21,7 @@ use crate::model::PaymentState::{
 use crate::model::{ChainSwap, Config, Direction, PaymentTxData, PaymentType};
 use crate::sdk::CHAIN_SWAP_MONITORING_PERIOD_BITCOIN_BLOCKS;
 use crate::swapper::Swapper;
-use crate::utils;
+use crate::{external_signer, utils};
 use crate::wallet::OnchainWallet;
 use crate::{error::PaymentError, model::PaymentState, persist::Persister};
 
@@ -36,6 +36,7 @@ pub(crate) struct ChainSwapStateHandler {
     liquid_chain_service: Arc<Mutex<dyn LiquidChainService>>,
     bitcoin_chain_service: Arc<Mutex<dyn BitcoinChainService>>,
     subscription_notifier: broadcast::Sender<String>,
+    external_signer: Arc<Mutex<external_signer::ExternalSigner>>,
 }
 
 impl ChainSwapStateHandler {
@@ -46,6 +47,7 @@ impl ChainSwapStateHandler {
         swapper: Arc<dyn Swapper>,
         liquid_chain_service: Arc<Mutex<dyn LiquidChainService>>,
         bitcoin_chain_service: Arc<Mutex<dyn BitcoinChainService>>,
+        external_signer: Arc<Mutex<external_signer::ExternalSigner>>,
     ) -> Result<Self> {
         let (subscription_notifier, _) = broadcast::channel::<String>(30);
         Ok(Self {
@@ -56,6 +58,7 @@ impl ChainSwapStateHandler {
             liquid_chain_service,
             bitcoin_chain_service,
             subscription_notifier,
+            external_signer,
         })
     }
 
@@ -582,7 +585,7 @@ impl ChainSwapStateHandler {
             lockup_details.amount, lockup_details.lockup_address
         );
 
-        let lockup_tx = match self
+        let mut lockup_tx = match self
             .onchain_wallet
             .build_tx(
                 None,
@@ -604,6 +607,9 @@ impl ChainSwapStateHandler {
             Err(e) => Err(e),
             Ok(lockup_tx) => Ok(lockup_tx),
         }?;
+
+        self.external_signer.lock().await.request_sig(&mut lockup_tx).await?;
+        let lockup_tx = self.onchain_wallet.finalize_tx(&mut lockup_tx).await?;
 
         let lockup_tx_id = self
             .liquid_chain_service

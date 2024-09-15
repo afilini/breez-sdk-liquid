@@ -18,7 +18,7 @@ use sdk_common::prelude::*;
 use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumString};
 
-use crate::error::{PaymentError, SdkResult};
+use crate::{error::{PaymentError, SdkResult}, external_signer::ExternalSigner, wallet::Key};
 use crate::receive_swap::{
     DEFAULT_ZERO_CONF_MAX_SAT, DEFAULT_ZERO_CONF_MIN_FEE_RATE_MAINNET,
     DEFAULT_ZERO_CONF_MIN_FEE_RATE_TESTNET,
@@ -192,6 +192,7 @@ pub enum SdkEvent {
 #[derive(Debug, Serialize)]
 pub struct ConnectRequest {
     pub mnemonic: String,
+    pub keys: Vec<Key>,
     pub config: Config,
 }
 

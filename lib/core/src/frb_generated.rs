@@ -2185,6 +2185,7 @@ impl SseDecode for crate::model::ConnectRequest {
         return crate::model::ConnectRequest {
             mnemonic: var_mnemonic,
             config: var_config,
+            keys: todo!(),
         };
     }
 }
@@ -7666,6 +7667,7 @@ mod io {
             crate::model::ConnectRequest {
                 mnemonic: self.mnemonic.cst_decode(),
                 config: self.config.cst_decode(),
+                keys: todo!(),
             }
         }
     }

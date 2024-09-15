@@ -2062,6 +2062,7 @@ dependencies = [
  "elements-miniscript",
  "fxhash",
  "idna 0.4.0",
+ "log",
  "lwk_common",
  "once_cell",
  "rand 0.8.5",

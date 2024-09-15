@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use lwk_wollet::{
-    elements::{Address, Transaction},
+    elements::{pset::PartiallySignedTransaction, Address, Transaction},
     Tip, WalletTx,
 };
 use sdk_common::bitcoin::util::bip32::{ChildNumber, ExtendedPrivKey};
@@ -36,8 +36,8 @@ impl OnchainWallet for MockWallet {
         _fee_rate: Option<f32>,
         _recipient_address: &str,
         _amount_sat: u64,
-    ) -> Result<Transaction, PaymentError> {
-        Ok(TEST_LIQUID_TX.clone())
+    ) -> Result<PartiallySignedTransaction, PaymentError> {
+        todo!()
     }
 
     async fn build_drain_tx(
@@ -45,8 +45,12 @@ impl OnchainWallet for MockWallet {
         _fee_rate_sats_per_kvb: Option<f32>,
         _recipient_address: &str,
         _enforce_amount_sat: Option<u64>,
-    ) -> Result<Transaction, PaymentError> {
-        Ok(TEST_LIQUID_TX.clone())
+    ) -> Result<PartiallySignedTransaction, PaymentError> {
+        todo!()
+    }
+
+    async fn finalize_tx(&self, _pset: &mut PartiallySignedTransaction) -> Result<Transaction, PaymentError> {
+        todo!()
     }
 
     async fn next_unused_address(&self) -> Result<Address, PaymentError> {

@@ -10,7 +10,7 @@ use log::{debug, error, info, warn};
 use lwk_wollet::bitcoin::Witness;
 use lwk_wollet::elements::Transaction;
 use lwk_wollet::hashes::{sha256, Hash};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::chain::liquid::LiquidChainService;
 use crate::model::PaymentState::{
@@ -19,7 +19,7 @@ use crate::model::PaymentState::{
 use crate::model::{Config, SendSwap};
 use crate::swapper::Swapper;
 use crate::wallet::OnchainWallet;
-use crate::{ensure_sdk, utils};
+use crate::{ensure_sdk, external_signer, utils};
 use crate::{
     error::PaymentError,
     model::{PaymentState, PaymentTxData, PaymentType},
@@ -37,6 +37,7 @@ pub(crate) struct SendSwapStateHandler {
     swapper: Arc<dyn Swapper>,
     chain_service: Arc<Mutex<dyn LiquidChainService>>,
     subscription_notifier: broadcast::Sender<String>,
+    external_signer: Arc<Mutex<external_signer::ExternalSigner>>,
 }
 
 impl SendSwapStateHandler {
@@ -46,6 +47,7 @@ impl SendSwapStateHandler {
         persister: Arc<Persister>,
         swapper: Arc<dyn Swapper>,
         chain_service: Arc<Mutex<dyn LiquidChainService>>,
+        external_signer: Arc<Mutex<external_signer::ExternalSigner>>,
     ) -> Self {
         let (subscription_notifier, _) = broadcast::channel::<String>(30);
         Self {
@@ -55,6 +57,7 @@ impl SendSwapStateHandler {
             swapper,
             chain_service,
             subscription_notifier,
+            external_signer,
         }
     }
 
@@ -230,7 +233,7 @@ impl SendSwapStateHandler {
             create_response.expected_amount, create_response.address
         );
 
-        let lockup_tx = self
+        let mut lockup_tx = self
             .onchain_wallet
             .build_tx(
                 self.config
@@ -240,6 +243,9 @@ impl SendSwapStateHandler {
                 create_response.expected_amount,
             )
             .await?;
+
+        self.external_signer.lock().await.request_sig(&mut lockup_tx).await?;
+        let lockup_tx = self.onchain_wallet.finalize_tx(&mut lockup_tx).await?;
 
         info!("broadcasting lockup tx {}", lockup_tx.txid());
         let lockup_tx_id = self

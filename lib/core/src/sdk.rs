@@ -4,15 +4,17 @@ use std::{fs, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use boltz_client::LockTime;
+use boltz_client::{boltz, LockTime};
 use boltz_client::{swaps::boltz::*, util::secrets::Preimage};
 use buy::{BuyBitcoinApi, BuyBitcoinService};
 use chain::bitcoin::HybridBitcoinChainService;
 use chain::liquid::{HybridLiquidChainService, LiquidChainService};
 use chain_swap::ESTIMATED_BTC_CLAIM_TX_VSIZE;
+use external_signer::ExternalSigner;
 use futures_util::stream::select_all;
 use futures_util::StreamExt;
 use log::{debug, error, info};
+use lwk_wollet::bitcoin::bip32;
 use lwk_wollet::bitcoin::hex::DisplayHex;
 use lwk_wollet::elements::{AssetId, Txid};
 use lwk_wollet::hashes::{sha256, Hash};
@@ -50,6 +52,12 @@ pub const DEFAULT_DATA_DIR: &str = ".data";
 /// Number of blocks to monitor a swap after its timeout block height
 pub const CHAIN_SWAP_MONITORING_PERIOD_BITCOIN_BLOCKS: u32 = 4320;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub enum Key {
+    Private,
+    Public(bip32::Xpub),
+}
+
 pub struct LiquidSdk {
     pub(crate) config: Config,
     pub(crate) onchain_wallet: Arc<dyn OnchainWallet>,
@@ -78,7 +86,7 @@ impl LiquidSdk {
     /// * `req` - the [ConnectRequest] containing:
     ///     * `mnemonic` - the Liquid wallet mnemonic
     ///     * `config` - the SDK [Config]
-    pub async fn connect(req: ConnectRequest) -> Result<Arc<LiquidSdk>> {
+    pub async fn connect(req: ConnectRequest, external_signer: ExternalSigner) -> Result<Arc<LiquidSdk>> {
         let maybe_swapper_proxy_url =
             match BreezServer::new("https://bs1.breez.technology:443".into(), None) {
                 Ok(breez_server) => breez_server
@@ -89,7 +97,7 @@ impl LiquidSdk {
                 Err(_) => None,
             };
 
-        let sdk = LiquidSdk::new(req.config, maybe_swapper_proxy_url, req.mnemonic)?;
+        let sdk = LiquidSdk::new(req.config, maybe_swapper_proxy_url, req.mnemonic, req.keys, external_signer)?;
         sdk.start().await?;
 
         Ok(sdk)
@@ -99,10 +107,12 @@ impl LiquidSdk {
         config: Config,
         swapper_proxy_url: Option<String>,
         mnemonic: String,
+        keys: Vec<Key>,
+        external_signer: ExternalSigner,
     ) -> Result<Arc<Self>> {
         fs::create_dir_all(&config.working_dir)?;
 
-        let onchain_wallet = Arc::new(LiquidOnchainWallet::new(mnemonic, config.clone())?);
+        let onchain_wallet = Arc::new(LiquidOnchainWallet::new(mnemonic, keys, config.clone())?);
 
         let persister = Arc::new(Persister::new(
             &config.get_wallet_working_dir(&onchain_wallet.lwk_signer)?,
@@ -125,12 +135,15 @@ impl LiquidSdk {
         let bitcoin_chain_service =
             Arc::new(Mutex::new(HybridBitcoinChainService::new(config.clone())?));
 
+        let external_signer = Arc::new(Mutex::new(external_signer));
+
         let send_swap_state_handler = SendSwapStateHandler::new(
             config.clone(),
             onchain_wallet.clone(),
             persister.clone(),
             swapper.clone(),
             liquid_chain_service.clone(),
+            Arc::clone(&external_signer),
         );
 
         let receive_swap_state_handler = ReceiveSwapStateHandler::new(
@@ -148,6 +161,7 @@ impl LiquidSdk {
             swapper.clone(),
             liquid_chain_service.clone(),
             bitcoin_chain_service.clone(),
+            Arc::clone(&external_signer),
         )?);
 
         let breez_server = Arc::new(BreezServer::new(PRODUCTION_BREEZSERVER_URL.into(), None)?);
@@ -528,6 +542,14 @@ impl LiquidSdk {
             "next_unused_address: {}",
             self.onchain_wallet.next_unused_address().await?
         );
+        debug!(
+            "next_unused_address unblinded: {}",
+            self.onchain_wallet.next_unused_address().await?.to_unconfidential()
+        );
+        debug!(
+            "next_unused_address script: {:?}",
+            self.onchain_wallet.next_unused_address().await?.script_pubkey()
+        );
 
         let mut pending_send_sat = 0;
         let mut pending_receive_sat = 0;
@@ -683,6 +705,7 @@ impl LiquidSdk {
             .onchain_wallet
             .build_tx(fee_rate, address, amount_sat)
             .await?
+            .extract_tx().unwrap()
             .all_fees()
             .values()
             .sum())
@@ -732,6 +755,7 @@ impl LiquidSdk {
             .onchain_wallet
             .build_drain_tx(None, temp_p2tr_addr, None)
             .await?
+            .extract_tx().unwrap()
             .all_fees()
             .values()
             .sum();
@@ -982,6 +1006,7 @@ impl LiquidSdk {
                 receiver_amount_sat,
             )
             .await?;
+        let tx: lwk_wollet::elements::Transaction = todo!();
 
         let tx_id = tx.txid().to_string();
         let payer_amount_sat = receiver_amount_sat + fees_sat;

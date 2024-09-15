@@ -4,11 +4,13 @@ use std::{str::FromStr, sync::Arc};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use boltz_client::ElementsAddress;
-use lwk_common::Signer;
+use lwk_common::{Multisig, Signer};
 use lwk_common::{singlesig_desc, Singlesig};
 use lwk_signer::{AnySigner, SwSigner};
+use lwk_wollet::elements::pset::PartiallySignedTransaction;
+use lwk_wollet::elements_miniscript::descriptor::checksum::desc_checksum;
 use lwk_wollet::{
-    elements::{Address, Transaction},
+    elements::{Address, Transaction, bitcoin::bip32},
     ElectrumClient, ElectrumUrl, ElementsNetwork, FsPersister, Tip, WalletTx, Wollet,
     WolletDescriptor,
 };
@@ -16,6 +18,7 @@ use sdk_common::bitcoin::hashes::{sha256, Hash};
 use sdk_common::bitcoin::secp256k1::{Message, PublicKey, Secp256k1};
 use sdk_common::bitcoin::util::bip32::{ChildNumber, ExtendedPrivKey};
 use sdk_common::lightning::util::message_signing::verify;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -37,7 +40,7 @@ pub trait OnchainWallet: Send + Sync {
         fee_rate_sats_per_kvb: Option<f32>,
         recipient_address: &str,
         amount_sat: u64,
-    ) -> Result<Transaction, PaymentError>;
+    ) -> Result<PartiallySignedTransaction, PaymentError>;
 
     /// Builds a drain tx.
     ///
@@ -51,7 +54,9 @@ pub trait OnchainWallet: Send + Sync {
         fee_rate_sats_per_kvb: Option<f32>,
         recipient_address: &str,
         enforce_amount_sat: Option<u64>,
-    ) -> Result<Transaction, PaymentError>;
+    ) -> Result<PartiallySignedTransaction, PaymentError>;
+
+    async fn finalize_tx(&self, pset: &mut PartiallySignedTransaction) -> Result<Transaction, PaymentError>;
 
     /// Get the next unused address in the wallet
     async fn next_unused_address(&self) -> Result<Address, PaymentError>;
@@ -82,11 +87,69 @@ pub(crate) struct LiquidOnchainWallet {
     pub(crate) lwk_signer: SwSigner,
 }
 
+pub use crate::sdk::Key;
+
+fn fmt_path(path: &bip32::DerivationPath) -> String {
+    path.to_string().replace("m/", "").replace('\'', "h")
+}
+
+fn multisig_desc(
+    threshold: u32,
+    xpubs: Vec<(Option<bip32::KeySource>, bip32::Xpub)>,
+    script_variant: Multisig,
+) -> Result<String, String> {
+    if threshold == 0 {
+        return Err("Threshold cannot be 0".into());
+    } else if threshold as usize > xpubs.len() {
+        return Err("Threshold cannot be greater than the number of xpubs".into());
+    }
+
+    let (prefix, suffix) = match script_variant {
+        Multisig::Wsh => ("elwsh(multi", ")"),
+    };
+
+    let mut engine = sha256::HashEngine::default();
+    for (source, xpub) in &xpubs {
+        let fp = if let Some(source) = source {
+            source.0
+        } else {
+            xpub.fingerprint()
+        };
+
+        engine.write_all(fp.as_bytes()).unwrap();
+    }
+    let hashed_msg = sha256::Hash::from_engine(engine);
+
+    use sdk_common::bitcoin::hashes::hex::ToHex;
+    let blinding_key = format!("slip77({})", hashed_msg.to_hex());
+
+    let xpubs = xpubs
+        .iter()
+        .map(|(keyorigin, xpub)| {
+            let prefix = if let Some((fingerprint, path)) = keyorigin {
+                format!("[{fingerprint}/{}]", fmt_path(path))
+            } else {
+                "".to_string()
+            };
+            format!("{prefix}{xpub}/<0;1>/*")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let desc = format!("ct({blinding_key},{prefix}({threshold},{xpubs}){suffix})");
+    let checksum = desc_checksum(&desc).map_err(|e| format!("{:?}", e))?;
+    Ok(format!("{desc}#{checksum}"))
+}
+
 impl LiquidOnchainWallet {
-    pub(crate) fn new(mnemonic: String, config: Config) -> Result<Self> {
+    pub(crate) fn new(mnemonic: String, keys: Vec<Key>, config: Config) -> Result<Self> {
         let is_mainnet = config.network == LiquidNetwork::Mainnet;
         let lwk_signer = SwSigner::new(&mnemonic, is_mainnet)?;
-        let descriptor = LiquidOnchainWallet::get_descriptor(&lwk_signer, config.network)?;
+        let xpubs = keys.into_iter().map(|k| match k {
+            Key::Private => (None, lwk_signer.xpub()),
+            Key::Public(xpub) => (None, xpub)
+        }).collect();
+        let descriptor = LiquidOnchainWallet::get_descriptor(xpubs)?;
+        log::info!("{}", descriptor);
         let elements_network: ElementsNetwork = config.network.into();
 
         let lwk_persister = FsPersister::new(
@@ -103,16 +166,9 @@ impl LiquidOnchainWallet {
     }
 
     fn get_descriptor(
-        signer: &SwSigner,
-        network: LiquidNetwork,
+        xpubs: Vec<(Option<bip32::KeySource>, bip32::Xpub)>,
     ) -> Result<WolletDescriptor, PaymentError> {
-        let is_mainnet = network == LiquidNetwork::Mainnet;
-        let descriptor_str = singlesig_desc(
-            signer,
-            Singlesig::Wpkh,
-            lwk_common::DescriptorBlindingKey::Slip77,
-            is_mainnet,
-        )
+        let descriptor_str = multisig_desc(1, xpubs, Multisig::Wsh) // TODO: change threshold!!
         .map_err(|e| anyhow!("Invalid descriptor: {e}"))?;
         Ok(descriptor_str.parse()?)
     }
@@ -134,7 +190,7 @@ impl OnchainWallet for LiquidOnchainWallet {
         fee_rate_sats_per_kvb: Option<f32>,
         recipient_address: &str,
         amount_sat: u64,
-    ) -> Result<Transaction, PaymentError> {
+    ) -> Result<PartiallySignedTransaction, PaymentError> {
         let lwk_wollet = self.wallet.lock().await;
         let mut pset = lwk_wollet::TxBuilder::new(self.config.network.into())
             .add_lbtc_recipient(
@@ -151,7 +207,7 @@ impl OnchainWallet for LiquidOnchainWallet {
             .finish(&lwk_wollet)?;
         let signer = AnySigner::Software(self.lwk_signer.clone());
         signer.sign(&mut pset)?;
-        Ok(lwk_wollet.finalize(&mut pset)?)
+        Ok(pset)
     }
 
     async fn build_drain_tx(
@@ -159,7 +215,7 @@ impl OnchainWallet for LiquidOnchainWallet {
         fee_rate_sats_per_kvb: Option<f32>,
         recipient_address: &str,
         enforce_amount_sat: Option<u64>,
-    ) -> Result<Transaction, PaymentError> {
+    ) -> Result<PartiallySignedTransaction, PaymentError> {
         let lwk_wollet = self.wallet.lock().await;
 
         let address =
@@ -194,7 +250,12 @@ impl OnchainWallet for LiquidOnchainWallet {
 
         let signer = AnySigner::Software(self.lwk_signer.clone());
         signer.sign(&mut pset)?;
-        Ok(lwk_wollet.finalize(&mut pset)?)
+        Ok(pset)
+    }
+
+    async fn finalize_tx(&self, pset: &mut PartiallySignedTransaction) -> Result<Transaction, PaymentError> {
+        let lwk_wollet = self.wallet.lock().await;
+        Ok(lwk_wollet.finalize(pset)?)
     }
 
     /// Get the next unused address in the wallet

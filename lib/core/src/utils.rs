@@ -68,9 +68,10 @@ pub(crate) async fn derive_fee_rate_sats_per_kvb(
     recipient_address: &str,
     absolute_fees_sat: u64,
 ) -> Result<f32> {
-    let standard_fees_sat = wallet
+    let mut pset = wallet
         .build_tx(None, recipient_address, amount_sat)
-        .await?
+        .await?;
+    let standard_fees_sat = wallet.finalize_tx(&mut pset).await?
         .all_fees()
         .values()
         .sum::<u64>() as f64;

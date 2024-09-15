@@ -72,11 +72,17 @@ async fn main() -> Result<()> {
     let mnemonic = persistence.get_or_create_mnemonic()?;
     let network = args.network.unwrap_or(LiquidNetwork::Testnet);
     let mut config = LiquidSdk::default_config(network);
+    let (local, mut remote) = external_signer::make_channel();
     config.working_dir = data_dir_str;
     let sdk = LiquidSdk::connect(ConnectRequest {
         mnemonic: mnemonic.to_string(),
         config,
-    })
+        keys: vec![
+            Key::Private,
+            Key::Public("xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU".parse().unwrap()),
+            Key::Public("xpub6BAncmx64zH2wGABVkL51fX9xvvNEJ7sTqJgYUwquhx9XkjNtdN4JrAVqFXw6Kq6dw2uBoXN6eM7yPLSFaPCNZU7wP4Ka1shnt2TdbQeAeL".parse().unwrap())
+        ],
+    }, local)
     .await?;
     let listener_id = sdk
         .add_event_listener(Box::new(CliEventListener {}))
@@ -86,6 +92,15 @@ async fn main() -> Result<()> {
         LiquidNetwork::Mainnet => "breez-liquid-cli [mainnet]> ",
         LiquidNetwork::Testnet => "breez-liquid-cli [testnet]> ",
     };
+
+    tokio::spawn(async move {
+        while let Some(pset) = remote.wait_for_request().await.unwrap() {
+            log::info!("Requested sig for pset...");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            log::info!("Sending back reply");
+            remote.provide_sig(pset).await.unwrap();
+        }
+    });
 
     loop {
         let readline = rl.readline(cli_prompt);

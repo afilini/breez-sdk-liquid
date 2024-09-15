@@ -48,7 +48,7 @@ impl log::Log for DartBindingLogger {
 }
 
 pub async fn connect(req: ConnectRequest) -> Result<BindingLiquidSdk, SdkError> {
-    let ln_sdk = LiquidSdk::connect(req).await?;
+    let ln_sdk = LiquidSdk::connect(req, todo!()).await?;
     Ok(BindingLiquidSdk { sdk: ln_sdk })
 }
 
