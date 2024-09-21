@@ -267,6 +267,10 @@ impl LiquidSdk {
         Ok(())
     }
 
+    pub async fn is_connected(&self) -> bool {
+        *self.is_started.read().await
+    }
+
     async fn track_swap_updates(self: &Arc<LiquidSdk>) {
         let cloned = self.clone();
         tokio::spawn(async move {
