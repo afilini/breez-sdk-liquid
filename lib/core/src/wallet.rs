@@ -168,8 +168,8 @@ impl LiquidOnchainWallet {
     fn get_descriptor(
         xpubs: Vec<(Option<bip32::KeySource>, bip32::Xpub)>,
     ) -> Result<WolletDescriptor, PaymentError> {
-        let descriptor_str = multisig_desc(1, xpubs, Multisig::Wsh) // TODO: change threshold!!
-        .map_err(|e| anyhow!("Invalid descriptor: {e}"))?;
+        let descriptor_str = multisig_desc(2, xpubs, Multisig::Wsh)
+            .map_err(|e| anyhow!("Invalid descriptor: {e}"))?;
         Ok(descriptor_str.parse()?)
     }
 }
