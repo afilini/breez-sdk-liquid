@@ -879,6 +879,20 @@ impl LiquidSdk {
         })
     }
 
+    pub async fn estimate_swap_fee(&self, receiver_amount_sat: u64) -> Result<u64, PaymentError> {
+        let lbtc_pair = self.validate_submarine_pairs(receiver_amount_sat)?;
+
+        let fees_sat = {
+            let boltz_fees_total = lbtc_pair.fees.total(receiver_amount_sat);
+            let lockup_fees_sat = self
+                .estimate_lockup_tx_fee_send(100) // FIXME: this builds on the assumption that we only have one UTXO in our wallet
+                .await?;
+            boltz_fees_total + lockup_fees_sat
+        };
+
+        Ok(fees_sat)
+    }
+
     fn ensure_send_is_not_self_transfer(&self, invoice: &str) -> Result<(), PaymentError> {
         match self.persister.fetch_receive_swap_by_invoice(invoice)? {
             None => Ok(()),
